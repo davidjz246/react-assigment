@@ -126,6 +126,7 @@ export default function App() {
   const [selectedCatFilter, setSelectedCatFilter] = useState('');
   const [selectedBrandFilter, setSelectedBrandFilter] = useState('');
   const [sortBy, setSortBy] = useState('');
+  const [loading, setLoading] = useState(false);
 
   // Toast / Notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -195,6 +196,7 @@ export default function App() {
 
   const fetchProducts = async (query = '') => {
     try {
+      setLoading(true);
       const res = await fetch(`/api/v1/products${query}`);
       const data = await res.json();
       if (data && data.data) {
@@ -204,6 +206,8 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to fetch products', err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -277,6 +281,21 @@ export default function App() {
     }
   };
 
+  const clearAllOrders = async () => {
+    try {
+      if (token) {
+        await fetch('/api/v1/orders', {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      }
+      setOrders([]);
+      showToast('All orders cleared successfully');
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // Cart Operations (Allows guest usage without sign in)
   const addToCart = async (productId: string) => {
     const prod = products.find(p => p._id === productId);
@@ -328,6 +347,11 @@ export default function App() {
   };
 
   const updateCartQuantity = async (productId: string, count: number) => {
+    if (count <= 0) {
+      removeFromCart(productId);
+      return;
+    }
+
     if (token) {
       try {
         const res = await fetch(`/api/v1/cart/${productId}`, {
@@ -354,7 +378,8 @@ export default function App() {
         item.product._id === productId ? { ...item, count } : item
       ).filter(item => item.count > 0);
 
-      const total = updatedProducts.reduce((sum, item) => sum + (item.price * item.count), 0);
+      const subtotal = updatedProducts.reduce((sum, item) => sum + (item.price * item.count), 0);
+      const total = prevCart.discount ? Math.round(subtotal * 0.9) : subtotal;
       return {
         ...prevCart,
         products: updatedProducts,
@@ -384,7 +409,8 @@ export default function App() {
     // Guest remove
     setCart(prevCart => {
       const updatedProducts = prevCart.products.filter(item => item.product._id !== productId);
-      const total = updatedProducts.reduce((sum, item) => sum + (item.price * item.count), 0);
+      const subtotal = updatedProducts.reduce((sum, item) => sum + (item.price * item.count), 0);
+      const total = prevCart.discount ? Math.round(subtotal * 0.9) : subtotal;
       return {
         ...prevCart,
         products: updatedProducts,
@@ -394,7 +420,7 @@ export default function App() {
     showToast('Item removed from cart');
   };
 
-  // Move product from cart to wishlist
+  // Move product from cart to wishlist (single toast, no duplicate notification)
   const moveCartItemToWishlist = async (productId: string) => {
     // Add to wishlist
     if (!wishlistIds.includes(productId)) {
@@ -413,8 +439,33 @@ export default function App() {
       }
     }
 
-    // Remove from cart
-    await removeFromCart(productId);
+    // Silently remove from cart
+    if (token) {
+      try {
+        const res = await fetch(`/api/v1/cart/${productId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await res.json();
+        if (data.status === 'success' && data.data) {
+          setCart(data.data);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    } else {
+      setCart(prevCart => {
+        const updatedProducts = prevCart.products.filter(item => item.product._id !== productId);
+        const subtotal = updatedProducts.reduce((sum, item) => sum + (item.price * item.count), 0);
+        const total = prevCart.discount ? Math.round(subtotal * 0.9) : subtotal;
+        return {
+          ...prevCart,
+          products: updatedProducts,
+          totalCartPrice: total
+        };
+      });
+    }
+
     showToast('Item moved to your Wishlist!');
   };
 
@@ -569,8 +620,14 @@ export default function App() {
   const handleLogout = () => {
     localStorage.removeItem('freshcart_token');
     localStorage.removeItem('freshcart_user');
+    localStorage.removeItem('freshcart_guest_cart');
+    localStorage.removeItem('freshcart_guest_wishlist');
     setToken(null);
     setUser(null);
+    setCart({ _id: 'guest_cart', products: [], totalCartPrice: 0 });
+    setWishlistIds([]);
+    setWishlistProducts([]);
+    setOrders([]);
     showToast('Logged out successfully');
     setCurrentRoute('home');
   };
@@ -744,6 +801,14 @@ export default function App() {
     return matchesKeyword && matchesCat && matchesBrand;
   });
 
+  const displayedProducts = [...filteredProducts].sort((a, b) => {
+    if (sortBy === 'price') return a.price - b.price;
+    if (sortBy === '-price') return b.price - a.price;
+    if (sortBy === '-ratingsAverage') return b.ratingsAverage - a.ratingsAverage;
+    if (sortBy === '-sold') return b.sold - a.sold;
+    return 0;
+  });
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col antialiased selection:bg-emerald-500 selection:text-white">
       {/* Toast Notification Banner */}
@@ -763,7 +828,7 @@ export default function App() {
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 px-6 py-4 flex items-center justify-between gap-8">
         {/* Zone 1: Brand Logo */}
         <div 
-          onClick={() => { setSelectedCatFilter(''); setSelectedBrandFilter(''); setSearchKeyword(''); setCurrentRoute('home'); }} 
+          onClick={() => { setSelectedCatFilter(''); setSelectedBrandFilter(''); setSearchKeyword(''); setSortBy(''); setCurrentRoute('home'); }} 
           className="flex items-center gap-2 cursor-pointer whitespace-nowrap shrink-0 group"
         >
           <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white shadow-md group-hover:bg-emerald-700 transition-colors">
@@ -1146,11 +1211,7 @@ export default function App() {
 
                 <select
                   value={sortBy}
-                  onChange={(e) => {
-                    setSortBy(e.target.value);
-                    const query = `?sort=${e.target.value}`;
-                    fetchProducts(query);
-                  }}
+                  onChange={(e) => setSortBy(e.target.value)}
                   className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 >
                   <option value="">Sort By: Default</option>
@@ -1162,13 +1223,24 @@ export default function App() {
               </div>
             </div>
 
-            {filteredProducts.length === 0 ? (
+            {loading ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 py-6">
+                {[1, 2, 3, 4, 5, 6, 7, 8].map(n => (
+                  <div key={n} className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 animate-pulse">
+                    <div className="aspect-[4/3] bg-slate-100 rounded-xl"></div>
+                    <div className="h-4 bg-slate-100 rounded w-3/4"></div>
+                    <div className="h-3 bg-slate-100 rounded w-1/2"></div>
+                    <div className="h-6 bg-slate-100 rounded w-full pt-2"></div>
+                  </div>
+                ))}
+              </div>
+            ) : displayedProducts.length === 0 ? (
               <div className="text-center py-20 bg-white rounded-2xl border border-slate-200">
                 <Package className="w-12 h-12 text-slate-300 mx-auto mb-3" />
                 <h3 className="text-base font-semibold text-slate-800">No products found</h3>
                 <p className="text-xs text-slate-500 mt-1">Try adjusting your filters or search keywords.</p>
                 <button 
-                  onClick={() => { setSearchKeyword(''); setSelectedCatFilter(''); setSelectedBrandFilter(''); }}
+                  onClick={() => { setSearchKeyword(''); setSelectedCatFilter(''); setSelectedBrandFilter(''); setSortBy(''); }}
                   className="mt-4 px-4 py-2 bg-emerald-600 text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 transition-colors"
                 >
                   Reset Filters
@@ -1176,7 +1248,7 @@ export default function App() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                {filteredProducts.map(prod => (
+                {displayedProducts.map(prod => (
                   <div key={prod._id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-lg transition-all flex flex-col group">
                     <div className="relative aspect-[4/3] bg-slate-100 overflow-hidden">
                       <img 
@@ -1235,8 +1307,19 @@ export default function App() {
 
         {/* 3. PRODUCT DETAIL ROUTE */}
         {currentRoute === 'product-detail' && selectedProductId && (() => {
-          const prod = products.find(p => p._id === selectedProductId) || products[0];
-          if (!prod) return <div>Product not found</div>;
+          const prod = products.find(p => p._id === selectedProductId);
+          if (!prod) {
+            return (
+              <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center shadow-sm space-y-4">
+                <Package className="w-16 h-16 text-slate-300 mx-auto" />
+                <h2 className="text-xl font-bold text-slate-800">Product Not Found</h2>
+                <p className="text-xs text-slate-500">The product you are looking for does not exist or has been removed.</p>
+                <button onClick={() => setCurrentRoute('products')} className="px-5 py-2.5 bg-emerald-600 text-white text-xs font-semibold rounded-xl hover:bg-emerald-700 transition-colors">
+                  Browse Catalog
+                </button>
+              </div>
+            );
+          }
           return (
             <div className="bg-white rounded-3xl border border-slate-200 p-6 md:p-10 shadow-sm space-y-10">
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
@@ -1480,24 +1563,32 @@ export default function App() {
                     )}
 
                     <div className="space-y-2 pt-2 text-xs text-slate-600">
-                      <div className="flex justify-between">
-                        <span>Subtotal</span>
-                        <span className="font-semibold text-slate-900">EGP {cart.totalCartPrice}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Delivery Fee</span>
-                        <span className="font-semibold text-emerald-600">FREE</span>
-                      </div>
-                      {cart.discount && (
-                        <div className="flex justify-between text-emerald-600 font-semibold">
-                          <span>Discount (10%)</span>
-                          <span>Applied</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between text-base font-bold text-slate-900 pt-3 border-t border-slate-100">
-                        <span>Total</span>
-                        <span>EGP {cart.totalCartPrice}</span>
-                      </div>
+                      {(() => {
+                        const subtotal = cart.products.reduce((acc, item) => acc + (item.price * item.count), 0);
+                        const discountAmount = cart.discount ? Math.round(subtotal * 0.1) : 0;
+                        return (
+                          <>
+                            <div className="flex justify-between">
+                              <span>Subtotal</span>
+                              <span className="font-semibold text-slate-900">EGP {subtotal}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>Delivery Fee</span>
+                              <span className="font-semibold text-emerald-600">FREE</span>
+                            </div>
+                            {cart.discount && (
+                              <div className="flex justify-between text-emerald-600 font-semibold">
+                                <span>Discount (10%)</span>
+                                <span>-EGP {discountAmount}</span>
+                              </div>
+                            )}
+                            <div className="flex justify-between text-base font-bold text-slate-900 pt-3 border-t border-slate-100">
+                              <span>Total</span>
+                              <span>EGP {cart.totalCartPrice}</span>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
 
                     {!token && (
@@ -1668,7 +1759,10 @@ export default function App() {
                       <div className="flex items-center justify-between pt-2 border-t border-slate-100">
                         <span className="text-sm font-bold text-slate-900">EGP {prod.priceAfterDiscount || prod.price}</span>
                         <button
-                          onClick={() => addToCart(prod._id)}
+                          onClick={() => {
+                            addToCart(prod._id);
+                            toggleWishlist(prod._id);
+                          }}
                           className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
                         >
                           <ShoppingCart className="w-3.5 h-3.5" /> Move to Cart
@@ -1685,9 +1779,19 @@ export default function App() {
         {/* 9. ORDERS ROUTE */}
         {currentRoute === 'orders' && (
           <div className="space-y-6">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-              <h1 className="text-2xl font-bold text-slate-900">My Orders</h1>
-              <p className="text-xs text-slate-500 mt-1">Track your past and active orders</p>
+            <div className="flex items-center justify-between bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">My Orders</h1>
+                <p className="text-xs text-slate-500 mt-1">Track your past and active orders</p>
+              </div>
+              {orders.length > 0 && (
+                <button
+                  onClick={clearAllOrders}
+                  className="text-xs font-semibold text-rose-600 hover:bg-rose-50 px-3 py-2 rounded-lg transition-colors border border-rose-200 flex items-center gap-1.5"
+                >
+                  <Trash2 className="w-4 h-4" /> Clear All Orders
+                </button>
+              )}
             </div>
 
             {orders.length === 0 ? (
@@ -1981,38 +2085,54 @@ export default function App() {
 
         {currentRoute === 'change-password' && (
           <div className="max-w-md mx-auto bg-white p-8 rounded-3xl border border-slate-200 shadow-xl space-y-6 my-10">
-            <div className="text-center space-y-2">
-              <h1 className="text-2xl font-extrabold text-slate-900">Change Password</h1>
-              <p className="text-xs text-slate-500">Update your account password</p>
-            </div>
+            {!token ? (
+              <div className="text-center py-6 space-y-4">
+                <Lock className="w-12 h-12 text-slate-300 mx-auto" />
+                <h2 className="text-xl font-bold text-slate-800">Authentication Required</h2>
+                <p className="text-xs text-slate-500">Please sign in to change your account password.</p>
+                <button
+                  onClick={() => setCurrentRoute('login')}
+                  className="px-6 py-2.5 bg-emerald-600 text-white text-xs font-semibold rounded-xl hover:bg-emerald-700 transition-colors shadow-md"
+                >
+                  Sign In
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="text-center space-y-2">
+                  <h1 className="text-2xl font-extrabold text-slate-900">Change Password</h1>
+                  <p className="text-xs text-slate-500">Update your account password</p>
+                </div>
 
-            <form onSubmit={handleChangePassword} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Current Password</label>
-                <input
-                  type="password"
-                  required
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">New Password</label>
-                <input
-                  type="password"
-                  required
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-              <button type="submit" className="w-full py-3.5 bg-emerald-600 text-white font-bold rounded-xl shadow-md text-sm">
-                Update Password
-              </button>
-            </form>
+                <form onSubmit={handleChangePassword} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Current Password</label>
+                    <input
+                      type="password"
+                      required
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">New Password</label>
+                    <input
+                      type="password"
+                      required
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                  <button type="submit" className="w-full py-3.5 bg-emerald-600 text-white font-bold rounded-xl shadow-md text-sm">
+                    Update Password
+                  </button>
+                </form>
+              </>
+            )}
           </div>
         )}
 

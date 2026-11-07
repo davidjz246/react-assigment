@@ -112,8 +112,63 @@ fallbackCategories.forEach((category, catIdx) => {
 // Universal Proxy Middleware with Fallback & Strict Password / Phone Validation
 app.all('/api/v1/*', async (req, res) => {
   const endpoint = req.path;
-  const targetUrl = `${ROUTE_API_BASE}${endpoint.replace('/api/v1', '')}`;
+  const pathParts = endpoint.split('/').filter(Boolean);
+  const resource = pathParts[2];
   const method = req.method;
+
+  // Intercept Orders locally so user doesn't see thousands of public orders from Route Misr
+  if (resource === 'orders') {
+    if (method === 'GET') {
+      return res.json({ results: fallbackOrders.length, data: fallbackOrders });
+    }
+    if (method === 'DELETE') {
+      fallbackOrders = [];
+      return res.json({ status: 'success', message: 'All orders cleared', data: [] });
+    }
+    if (method === 'POST') {
+      const authHeader = req.headers.authorization || '';
+      const token = authHeader ? (authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`) : 'token_guest';
+      const cartId = pathParts[3] || (pathParts[2] === 'checkout-session' ? pathParts[4] : undefined);
+      
+      let userCart = fallbackCarts[token];
+      if (!userCart && cartId) {
+        userCart = Object.values(fallbackCarts).find((c: any) => c._id === cartId);
+      }
+
+      let orderItems: any[] = [];
+      let orderPrice = 0;
+
+      if (userCart && userCart.products.length > 0) {
+        orderItems = [...userCart.products];
+        orderPrice = userCart.totalCartPrice;
+        userCart.products = [];
+        userCart.totalCartPrice = 0;
+        userCart.discount = undefined;
+      } else {
+        orderItems = [{ product: fallbackProducts[0], count: 1, price: 240 }];
+        orderPrice = 240;
+      }
+
+      const newOrd = {
+        _id: 'ord_' + Date.now(),
+        cartItems: orderItems,
+        totalOrderPrice: orderPrice,
+        shippingAddress: req.body.shippingAddress || { details: 'Cairo', city: 'Cairo', phone: '01012345678' },
+        paymentMethodType: endpoint.includes('checkout-session') ? 'card' : 'cash',
+        isPaid: endpoint.includes('checkout-session'),
+        isDelivered: false,
+        createdAt: new Date().toISOString(),
+      };
+      fallbackOrders.unshift(newOrd);
+      return res.json({
+        status: 'success',
+        session: { url: '/orders?success=true' },
+        data: newOrd,
+      });
+    }
+  }
+
+  const targetUrl = `${ROUTE_API_BASE}${endpoint.replace('/api/v1', '')}`;
 
   try {
     const headers: Record<string, string> = {
@@ -307,44 +362,87 @@ app.all('/api/v1/*', async (req, res) => {
         if (user) {
           user.password = password;
         }
-        return res.json({ message: 'success', token: 'token_user_updated' });
+        return res.json({ message: 'success', token });
       }
     }
 
     // Cart
     if (resource === 'cart') {
-      const token = req.headers.authorization || 'token_guest';
+      const authHeader = req.headers.authorization || '';
+      const token = authHeader ? (authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`) : 'token_guest';
       if (!fallbackCarts[token]) {
         fallbackCarts[token] = { _id: 'cart_' + Date.now(), products: [], totalCartPrice: 0 };
       }
       const cart = fallbackCarts[token];
+
+      // Handle apply coupon
+      if (pathParts[3] === 'applyCoupon' && req.method === 'POST') {
+        const { coupon } = req.body;
+        if (!coupon || typeof coupon !== 'string' || coupon.trim() === '') {
+          return res.status(400).json({ status: 'fail', message: 'Please provide a valid coupon code.' });
+        }
+        const subtotal = cart.products.reduce((acc: number, i: any) => acc + i.price * i.count, 0);
+        cart.discount = 10;
+        cart.totalCartPrice = Math.round(subtotal * 0.9);
+        return res.json({
+          status: 'success',
+          message: 'Coupon applied successfully! (10% off)',
+          data: cart
+        });
+      }
+
       if (req.method === 'GET') {
         return res.json({ status: 'success', numOfCartItems: cart.products.reduce((a: number, b: any) => a + b.count, 0), data: cart });
       }
+
       if (req.method === 'POST') {
         const { productId } = req.body;
         const prod = fallbackProducts.find(p => p._id === productId) || fallbackProducts[0];
         const existing = cart.products.find((i: any) => i.product._id === productId);
-        if (existing) existing.count += 1;
-        else cart.products.push({ product: prod, count: 1, price: prod.priceAfterDiscount || prod.price });
-        cart.totalCartPrice = cart.products.reduce((acc: number, i: any) => acc + i.price * i.count, 0);
+        if (existing) {
+          existing.count += 1;
+        } else {
+          cart.products.push({ product: prod, count: 1, price: prod.priceAfterDiscount || prod.price });
+        }
+        const subtotal = cart.products.reduce((acc: number, i: any) => acc + i.price * i.count, 0);
+        cart.totalCartPrice = cart.discount ? Math.round(subtotal * 0.9) : subtotal;
         return res.json({ status: 'success', message: 'Added to cart', numOfCartItems: cart.products.reduce((a: number, b: any) => a + b.count, 0), data: cart });
       }
+
+      if (req.method === 'PUT') {
+        const productId = pathParts[3];
+        const { count } = req.body;
+        if (count <= 0) {
+          cart.products = cart.products.filter((i: any) => i.product._id !== productId);
+        } else {
+          const item = cart.products.find((i: any) => i.product._id === productId);
+          if (item) {
+            item.count = count;
+          }
+        }
+        const subtotal = cart.products.reduce((acc: number, i: any) => acc + i.price * i.count, 0);
+        cart.totalCartPrice = (cart.products.length > 0 && cart.discount) ? Math.round(subtotal * 0.9) : subtotal;
+        return res.json({ status: 'success', numOfCartItems: cart.products.reduce((a: number, b: any) => a + b.count, 0), data: cart });
+      }
+
       if (req.method === 'DELETE') {
         const itemId = pathParts[3];
         if (itemId) {
           cart.products = cart.products.filter((i: any) => i.product._id !== itemId);
         } else {
           cart.products = [];
+          cart.discount = undefined;
         }
-        cart.totalCartPrice = 0;
-        return res.json({ status: 'success', data: cart });
+        const subtotal = cart.products.reduce((acc: number, i: any) => acc + i.price * i.count, 0);
+        cart.totalCartPrice = (cart.products.length > 0 && cart.discount) ? Math.round(subtotal * 0.9) : subtotal;
+        return res.json({ status: 'success', numOfCartItems: cart.products.reduce((a: number, b: any) => a + b.count, 0), data: cart });
       }
     }
 
     // Wishlist
     if (resource === 'wishlist') {
-      const token = req.headers.authorization || 'token_guest';
+      const authHeader = req.headers.authorization || '';
+      const token = authHeader ? (authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`) : 'token_guest';
       if (!fallbackWishlists[token]) fallbackWishlists[token] = [];
       const list = fallbackWishlists[token];
       if (req.method === 'GET') {
@@ -363,16 +461,43 @@ app.all('/api/v1/*', async (req, res) => {
       }
     }
 
-    // Orders (Brand new: fallbackOrders starts empty)
+    // Orders
     if (resource === 'orders') {
       if (req.method === 'GET') {
         return res.json({ results: fallbackOrders.length, data: fallbackOrders });
       }
+      if (req.method === 'DELETE') {
+        fallbackOrders = [];
+        return res.json({ status: 'success', message: 'All orders cleared', data: [] });
+      }
       if (req.method === 'POST') {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader ? (authHeader.startsWith('Bearer ') ? authHeader : `Bearer ${authHeader}`) : 'token_guest';
+        const cartId = pathParts[3] || (pathParts[2] === 'checkout-session' ? pathParts[4] : undefined);
+        
+        let userCart = fallbackCarts[token];
+        if (!userCart && cartId) {
+          userCart = Object.values(fallbackCarts).find((c: any) => c._id === cartId);
+        }
+
+        let orderItems: any[] = [];
+        let orderPrice = 0;
+
+        if (userCart && userCart.products.length > 0) {
+          orderItems = [...userCart.products];
+          orderPrice = userCart.totalCartPrice;
+          userCart.products = [];
+          userCart.totalCartPrice = 0;
+          userCart.discount = undefined;
+        } else {
+          orderItems = [{ product: fallbackProducts[0], count: 1, price: 240 }];
+          orderPrice = 240;
+        }
+
         const newOrd = {
           _id: 'ord_' + Date.now(),
-          cartItems: [{ product: fallbackProducts[0], count: 1, price: 240 }],
-          totalOrderPrice: 240,
+          cartItems: orderItems,
+          totalOrderPrice: orderPrice,
           shippingAddress: req.body.shippingAddress || { details: 'Cairo', city: 'Cairo', phone: '01012345678' },
           paymentMethodType: endpoint.includes('checkout-session') ? 'card' : 'cash',
           isPaid: endpoint.includes('checkout-session'),
